@@ -1,0 +1,53 @@
+// Ниже рассмотрены основные моменты реализации простейших драйверов периферийных устройств и доступа к датчикам.
+// Запись результатов измерений ведется во внешнюю Flash-память с интерфейсом SPI. 
+// Процедуры инициализации шин SPI и I2C были взяты из библиотеки CC430x513x_Code_Examples [2,9] (архив slac458c.zip)
+// и немного адаптированы с учетом реально задействованных линий портов ввода-вывода.
+// В частности, для инициализации SPI был взят участок кода из файла-примера cc430x513x_uscia0_spi_09.
+
+void init_spi(void)
+{
+ // настраиваем выводы
+  PMAPPWD = 0x02D52;                        // Get write-access to port mapping regs  
+  P1MAP6 = PM_UCA0SIMO;                     // Map UCA0SIMO output to P1.6 
+  P1MAP5 = PM_UCA0SOMI;                     // Map UCA0SOMI output to P1.5 
+  P1MAP4 = PM_UCA0CLK;                      // Map UCA0CLK output to P1.4 
+  PMAPPWD = 0;                              // Lock port mapping registers 
+
+  P1DIR |= BIT7;        // cs - output
+  P1OUT |= 0x80;        // set high
+  P1DIR |= BIT6 + BIT5 + BIT4;
+  P1SEL |= BIT6 + BIT5 + BIT4;              // P2.0,2,4 for debugging purposes.
+
+  UCA0CTL1 |= UCSWRST;                      // **Put state machine in reset**
+  UCA0CTL0 |= UCMST+UCSYNC+UCCKPL+UCMSB;    // 3-pin, 8-bit SPI master
+                                            // Clock polarity high, MSB
+  UCA0CTL1 |= UCSSEL_2;                     // SMCLK
+  UCA0BR0 = 0x02;                           // /2
+  UCA0BR1 = 0;                              //
+  UCA0MCTL = 0;                             // No modulation
+  UCA0CTL1 &= ~UCSWRST;                     // **Initialize USCI state machine**
+  cs_high();
+}
+
+Инициализация шины I2C построена на базе примера cc430x513x_uscib0_i2c_04.c.
+
+void init_i2c(void)
+{
+ // настраиваем выводы
+  PMAPPWD = 0x02D52;                        // Get write-access to port mapping regs  
+  P1MAP3 = PM_UCB0SDA;                      // Map UCB0SDA output to P1.3 
+  P1MAP2 = PM_UCB0SCL;                      // Map UCB0SCL output to P1.2 
+  PMAPPWD = 0;                              // Lock port mapping registers 
+  
+  P1SEL |= BIT2 + BIT3;                     // Select P1.2 & P1.3 to I2C function
+ // настраиваем регистры и режим работы
+  UCB0CTL1 |= UCSWRST;                      // Enable SW reset
+  UCB0CTL0 = UCMST + UCMODE_3 + UCSYNC;     // I2C Master, synchronous mode
+  UCB0CTL1 = UCSSEL_2 + UCSWRST;            // Use SMCLK, keep SW reset
+  UCB0BR0 = 12;                             // fSCL = SMCLK/12 = ~100kHz
+  UCB0BR1 = 0;
+  // наши адреса: 0b1001000 --- 0b1001111
+  UCB0I2CSA = 0x48;                         // Slave Address is ...
+  UCB0CTL1 &= ~UCSWRST;                     // Clear SW reset, resume operation
+}
+

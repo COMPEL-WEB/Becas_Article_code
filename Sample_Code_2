@@ -1,0 +1,263 @@
+// исходный пример кода для узлов «Бекаса» (IAR)
+// Becas_main
+
+#define INDICATOR_TIME_OUT 250;
+
+#include <stdio.h>
+#include "bsp.h"
+#include "mrfi.h"
+#include "nwk_types.h"
+#include "nwk_api.h"
+#include "nwk_pll.h"
+#include "bsp_leds.h"
+#ifdef MRFI_CC430
+  #include "uart_intfc_cc430.h"
+#else
+  #include "uart_intfc.h"
+#endif
+
+// подключаем драйверы периферийных датчиков «Бекаса» и необходимые функции
+// работа с шинами I2C, SPI, опрос датчиков и обработчики прерываний
+#include "becas_bsp.h"
+#include "becas_bsp.c"
+// основной рабочий цикл
+void main (void)
+{
+  uint16_t led_tmr;
+// инициализируем поддержку платформы в стеке протоколов
+  BSP_Init( );
+// инициализируем радиочасть контроллера и стек протоколов SimpliciTI
+  SMPL_Init( NULL );
+
+#ifdef  LINK_TO 
+// задаем переменные состояния устройства
+  radio_of_state=-1;
+  device_state=measure;
+// инициализируем периферийные устройства «Бекаса»
+// настраиваются выводы, шины
+                    setup_becas_bsp(); 
+// запускаем таймер реального времени (срабатывание каждые 2 секунды)
+                    setup_RTC_timer();
+// проверяем наличие Flash-памяти и ее тип
+                    spi_read_id();
+// проверяем наличие и адреса датчиков
+                    read_sensors();
+// ищем адрес последней записи в SPI Flash-памяти
+                    search_last_note();
+                    begin_addr=last_addr; 
+// задаем интервал опроса
+                    interval=300;
+
+#else    // ifdef LINK_LISTEN
+
+// наш хост-узел
+// инициализируем UART
+       uart_intfc_init( );
+#endif
+
+
+#ifdef  LINK_TO
+begin_listen:
+// активируем радиочасть для приема
+  SMPL_Ioctl( IOCTL_OBJ_RADIO, IOCTL_ACT_RADIO_AWAKE, NULL );
+  SMPL_Ioctl( IOCTL_OBJ_RADIO, IOCTL_ACT_RADIO_RXON, NULL );
+// посылаем запрос на установление соединения
+  if (SMPL_SUCCESS != SMPL_Link(&LinkID))
+  {
+// в случае неудачи отключаем радио, переходим в режим пониженного энергопотребления
+      SMPL_Ioctl( IOCTL_OBJ_RADIO, IOCTL_ACT_RADIO_SLEEP, NULL );
+    __bis_SR_register(LPM0_bits + GIE);     // enter LPM0
+    __no_operation();
+// здесь контроллер периодически выходит из спящего режима по прерыванию RTC-таймера в том случае, если истек заданный временной интервал
+    goto begin_listen;
+  }
+  else
+  {
+// в случае успешного соединения изменяем переменные состояния
+    device_state=host_connect;
+    radio_of_state=-1;
+  };
+#else // ifdef LINK_LISTEN
+
+// включаем радиочасть на прием
+  SMPL_Ioctl( IOCTL_OBJ_RADIO, IOCTL_ACT_RADIO_RXON, NULL );
+// индицируем это включением диода
+  BSP_TURN_ON_LED1( );
+    {
+    uint8_t cnt = 0;
+// делаем небольшую паузу перед началом ожидания подключения
+    MRFI_DelayMs( 10000 );
+// сообщение в UART об ожидании подключения
+    tx_send_wait( "Looking for....\r\n", 15 );
+// ждем запроса на подключение
+    while (SMPL_SUCCESS != SMPL_LinkListen(&LinkID))
+// периодически «мигаем» диодом 
+      if( cnt++ == 0 )
+      {
+        BSP_TOGGLE_LED1( );
+        tx_send_wait(".",1);
+      }
+    }
+
+#endif
+
+#ifdef LINK_TO
+#else
+  tx_send_wait( "Link Established!\r\nReady...\r\n", 29 );
+
+  /* turn off the led */
+  BSP_TURN_OFF_LED1( );
+#endif
+
+
+// основной рабочий цикл
+ main_loop:
+
+#ifdef LINK_TO   
+// действия по приему байта данных
+    if( SMPL_Receive( LinkID, tx, &len ) == SMPL_SUCCESS )
+    {
+      switch (tx[0])
+      {
+      case 'd': // data
+        device_state=nothing;
+        send_data();
+        break;
+
+      case 'g': // go
+        device_state=measure;
+          cr();
+          while( SMPL_Send( LinkID, "Started:", 8 ) != SMPL_SUCCESS ){};
+        break;
+
+      case 's': //stop
+        device_state=nothing;
+          cr();
+          while( SMPL_Send( LinkID, "Stopped", 7 ) != SMPL_SUCCESS ){};
+          cr();
+        break;
+
+      case 'r': // read data in real-time
+        device_state=host_connect;
+          cr();
+          while( SMPL_Send( LinkID, "Data:", 5 ) != SMPL_SUCCESS ){};
+          cr();
+        break;
+
+      case 'q': // get selected data
+        device_state=nothing;
+        send_selected_data();
+        break;
+
+      case 'E': // !!! ERASE all flash
+        device_state=nothing;
+        cr();
+        while( SMPL_Send( LinkID, "Erasing", 7 ) != SMPL_SUCCESS ){};
+        spi_write_en();
+        spi_erase_all();
+        MRFI_DelayMs( 30000 );
+          while( SMPL_Send( LinkID, "...Erased", 9 ) != SMPL_SUCCESS ){};
+          cr();
+          last_addr=0x0;
+          begin_addr=last_addr;
+          n_of_measures=0;
+        break;
+
+      case 't': //time&date set
+        device_state=nothing;
+          cr();
+          while( SMPL_Send( LinkID, "Date&Time:", 10 ) != SMPL_SUCCESS ){};
+          cr();
+             for(char i=0; i<12; i++)
+             {
+                while(SMPL_Receive( LinkID, tx, &len ) != SMPL_SUCCESS){};
+                time_array[i]=tx[0]-0x30;
+                while( SMPL_Send( LinkID, tx, 1 ) != SMPL_SUCCESS ){};
+              };
+             set_RTC_time();
+          MRFI_DelayMs(10);
+          while( SMPL_Send( LinkID, "__done", 6 ) != SMPL_SUCCESS ){};
+           emit_num(year); emit('/'); // год
+           emit_num(month); emit('/'); // месяц
+           emit_num(day); bl();//день
+           emit_num(hh); emit(':');//час
+           emit_num(mm); emit(':');//минута
+           emit_num(ss); //секунды
+           tics=ss+mm*60+hh*3600;
+           cr();
+        break;
+
+      case 'i': // interval set
+        device_state=nothing;
+          cr();
+          while( SMPL_Send( LinkID, "Interval:", 9 ) != SMPL_SUCCESS ){};
+          cr();
+             for(char i=0; i<3; i++)
+             {
+                while(SMPL_Receive( LinkID, tx, &len ) != SMPL_SUCCESS){};
+                time_array[i]=tx[0]-0x30;
+                //echo
+                while( SMPL_Send( LinkID, tx, 1 ) != SMPL_SUCCESS ){};
+              };
+             MRFI_DelayMs(10);
+          while( SMPL_Send( LinkID, "_done_", 6 ) != SMPL_SUCCESS ){};
+           interval=time_array[0]*100+time_array[1]*10+time_array[2];
+           emit_num(interval); // interval
+           cr();
+        break;
+
+      case 'o': //off radio
+        device_state=measure;
+        cr();  
+        while( SMPL_Send( LinkID, "Link off", 8 ) != SMPL_SUCCESS ){};
+        cr();
+        radio_of_state=0;
+        break;
+      }
+    }
+
+    if(radio_of_state==0)
+    {
+      SMPL_Ioctl( IOCTL_OBJ_RADIO, IOCTL_ACT_RADIO_SLEEP, NULL );
+      MRFI_DelayMs( 15 );
+      goto begin_listen;
+    };
+
+#else // ifdef LINK_LISTEN
+
+// проверяем приход данных по радиоканалу
+    if( SMPL_Receive( LinkID, tx, &len ) == SMPL_SUCCESS )
+    {
+      /* blocking call but should be ok if both ends have same uart buad rate */
+// отправляем полученные данные в UART
+      tx_send_wait( tx, len );
+      led_tmr = INDICATOR_TIME_OUT;   /* update activity time out */
+    }
+
+    FHSS_ACTIVE( if( nwk_pllBackgrounder( false ) != false ) );
+    {
+// проверяем количество байт, полученных по UART
+      len = rx_receive( rx, MAX_APP_PAYLOAD );
+      if( len != 0 )
+      {
+// передаем данные в эфир
+        while( SMPL_Send( LinkID, rx, len ) != SMPL_SUCCESS );
+        led_tmr = INDICATOR_TIME_OUT;   /* update activity time out */
+// небольшая пауза
+        MRFI_DelayMs( 5 );
+      }
+    }
+// «мигаем» светодиодом
+    if( led_tmr != 0 )
+    {
+      led_tmr--;
+      BSP_TURN_ON_LED1( );
+    }
+    else
+      BSP_TURN_OFF_LED1( );
+
+#endif
+// замыкаем цикл работы
+    goto main_loop;
+}
+
